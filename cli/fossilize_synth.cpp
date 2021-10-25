@@ -346,135 +346,135 @@ static VkPipelineLayout synthesize_pipeline_layout(StateRecorder &recorder, spvc
 
 static VkRenderPass synthesize_render_pass(StateRecorder &recorder, spvc_compiler frag, uint8_t &active_rt_mask)
 {
-	if (!frag)
-		return VK_NULL_HANDLE;
-
-	spvc_resources resources;
-	if (spvc_compiler_create_shader_resources(frag, &resources) != SPVC_SUCCESS)
-	{
-		LOGE("Failed to reflect resources.\n");
-		return VK_NULL_HANDLE;
-	}
-
-	const spvc_reflected_resource *list;
-	size_t count;
-
 	VkFormat rt_formats[8] = {};
 	VkFormat input_rt_formats[8] = {};
 	unsigned num_rts = 0;
 	unsigned num_input_rts = 0;
 
-	if (spvc_resources_get_resource_list_for_type(resources, SPVC_RESOURCE_TYPE_STAGE_OUTPUT, &list, &count) != SPVC_SUCCESS)
-		return VK_NULL_HANDLE;
-
-	for (size_t i = 0; i < count; i++)
+	if (frag)
 	{
-		unsigned rt_count = 1;
-		spvc_type rt_type = spvc_compiler_get_type_handle(frag, list[i].type_id);
-
-		if (spvc_type_get_num_array_dimensions(rt_type) == 1)
+		spvc_resources resources;
+		if (spvc_compiler_create_shader_resources(frag, &resources) != SPVC_SUCCESS)
 		{
-			if (!spvc_type_array_dimension_is_literal(rt_type, 0))
-				return VK_NULL_HANDLE;
-			rt_count = spvc_type_get_array_dimension(rt_type, 0);
-		}
-
-		uint32_t location = spvc_compiler_get_decoration(frag, list[i].id, SpvDecorationLocation);
-		if (location + rt_count >= 8)
-		{
-			LOGE("RT index %u (array size %u) is out of range.\n", location, rt_count);
+			LOGE("Failed to reflect resources.\n");
 			return VK_NULL_HANDLE;
 		}
 
-		VkFormat base_format = VK_FORMAT_UNDEFINED;
-		switch (spvc_type_get_basetype(rt_type))
+		const spvc_reflected_resource *list;
+		size_t count;
+
+		if (spvc_resources_get_resource_list_for_type(resources, SPVC_RESOURCE_TYPE_STAGE_OUTPUT, &list, &count) != SPVC_SUCCESS)
+			return VK_NULL_HANDLE;
+
+		for (size_t i = 0; i < count; i++)
 		{
-		case SPVC_BASETYPE_FP16:
-		case SPVC_BASETYPE_FP32:
-			base_format = VK_FORMAT_R8G8B8A8_UNORM;
-			break;
+			unsigned rt_count = 1;
+			spvc_type rt_type = spvc_compiler_get_type_handle(frag, list[i].type_id);
 
-		case SPVC_BASETYPE_INT16:
-		case SPVC_BASETYPE_INT32:
-			base_format = VK_FORMAT_R8G8B8A8_SINT;
-			break;
+			if (spvc_type_get_num_array_dimensions(rt_type) == 1)
+			{
+				if (!spvc_type_array_dimension_is_literal(rt_type, 0))
+					return VK_NULL_HANDLE;
+				rt_count = spvc_type_get_array_dimension(rt_type, 0);
+			}
 
-		case SPVC_BASETYPE_UINT16:
-		case SPVC_BASETYPE_UINT32:
-			base_format = VK_FORMAT_R8G8B8A8_UINT;
-			break;
-
-		default:
-			break;
-		}
-
-		for (unsigned j = 0; j < rt_count; j++)
-		{
-			rt_formats[location + j] = base_format;
-			active_rt_mask |= 1u << (location + j);
-		}
-	}
-
-	if (spvc_resources_get_resource_list_for_type(resources, SPVC_RESOURCE_TYPE_SUBPASS_INPUT, &list, &count) != SPVC_SUCCESS)
-		return VK_NULL_HANDLE;
-
-	for (size_t i = 0; i < count; i++)
-	{
-		unsigned rt_count = 1;
-		spvc_type rt_type = spvc_compiler_get_type_handle(frag, list[i].type_id);
-
-		if (spvc_type_get_num_array_dimensions(rt_type) == 1)
-		{
-			if (!spvc_type_array_dimension_is_literal(rt_type, 0))
+			uint32_t location = spvc_compiler_get_decoration(frag, list[i].id, SpvDecorationLocation);
+			if (location + rt_count >= 8)
+			{
+				LOGE("RT index %u (array size %u) is out of range.\n", location, rt_count);
 				return VK_NULL_HANDLE;
-			rt_count = spvc_type_get_array_dimension(rt_type, 0);
+			}
+
+			VkFormat base_format = VK_FORMAT_UNDEFINED;
+			switch (spvc_type_get_basetype(rt_type))
+			{
+			case SPVC_BASETYPE_FP16:
+			case SPVC_BASETYPE_FP32:
+				base_format = VK_FORMAT_R8G8B8A8_UNORM;
+				break;
+
+			case SPVC_BASETYPE_INT16:
+			case SPVC_BASETYPE_INT32:
+				base_format = VK_FORMAT_R8G8B8A8_SINT;
+				break;
+
+			case SPVC_BASETYPE_UINT16:
+			case SPVC_BASETYPE_UINT32:
+				base_format = VK_FORMAT_R8G8B8A8_UINT;
+				break;
+
+			default:
+				break;
+			}
+
+			for (unsigned j = 0; j < rt_count; j++)
+			{
+				rt_formats[location + j] = base_format;
+				active_rt_mask |= 1u << (location + j);
+			}
 		}
 
-		uint32_t location = spvc_compiler_get_decoration(frag, list[i].id, SpvDecorationInputAttachmentIndex);
-		if (location + rt_count >= 8)
+		if (spvc_resources_get_resource_list_for_type(resources, SPVC_RESOURCE_TYPE_SUBPASS_INPUT, &list, &count) != SPVC_SUCCESS)
+			return VK_NULL_HANDLE;
+
+		for (size_t i = 0; i < count; i++)
 		{
-			LOGE("Input attachment index %u (array size %u) is out of range.\n", location, rt_count);
+			unsigned rt_count = 1;
+			spvc_type rt_type = spvc_compiler_get_type_handle(frag, list[i].type_id);
+
+			if (spvc_type_get_num_array_dimensions(rt_type) == 1)
+			{
+				if (!spvc_type_array_dimension_is_literal(rt_type, 0))
+					return VK_NULL_HANDLE;
+				rt_count = spvc_type_get_array_dimension(rt_type, 0);
+			}
+
+			uint32_t location = spvc_compiler_get_decoration(frag, list[i].id, SpvDecorationInputAttachmentIndex);
+			if (location + rt_count >= 8)
+			{
+				LOGE("Input attachment index %u (array size %u) is out of range.\n", location, rt_count);
+				return VK_NULL_HANDLE;
+			}
+
+			VkFormat base_format = VK_FORMAT_UNDEFINED;
+			switch (spvc_type_get_basetype(rt_type))
+			{
+			case SPVC_BASETYPE_FP16:
+			case SPVC_BASETYPE_FP32:
+				base_format = VK_FORMAT_R8G8B8A8_UNORM;
+				break;
+
+			case SPVC_BASETYPE_INT16:
+			case SPVC_BASETYPE_INT32:
+				base_format = VK_FORMAT_R8G8B8A8_SINT;
+				break;
+
+			case SPVC_BASETYPE_UINT16:
+			case SPVC_BASETYPE_UINT32:
+				base_format = VK_FORMAT_R8G8B8A8_UINT;
+				break;
+
+			default:
+				break;
+			}
+
+			for (unsigned j = 0; j < rt_count; j++)
+				input_rt_formats[location + j] = base_format;
+		}
+
+		for (unsigned i = 0; i < 8; i++)
+			if (rt_formats[i] != VK_FORMAT_UNDEFINED)
+				num_rts = i + 1;
+
+		for (unsigned i = 0; i < 8; i++)
+			if (input_rt_formats[i] != VK_FORMAT_UNDEFINED)
+				num_input_rts = i + 1;
+
+		if (num_rts + num_input_rts > 8)
+		{
+			LOGE("Number of total attachments exceeds 8.\n");
 			return VK_NULL_HANDLE;
 		}
-
-		VkFormat base_format = VK_FORMAT_UNDEFINED;
-		switch (spvc_type_get_basetype(rt_type))
-		{
-		case SPVC_BASETYPE_FP16:
-		case SPVC_BASETYPE_FP32:
-			base_format = VK_FORMAT_R8G8B8A8_UNORM;
-			break;
-
-		case SPVC_BASETYPE_INT16:
-		case SPVC_BASETYPE_INT32:
-			base_format = VK_FORMAT_R8G8B8A8_SINT;
-			break;
-
-		case SPVC_BASETYPE_UINT16:
-		case SPVC_BASETYPE_UINT32:
-			base_format = VK_FORMAT_R8G8B8A8_UINT;
-			break;
-
-		default:
-			break;
-		}
-
-		for (unsigned j = 0; j < rt_count; j++)
-			input_rt_formats[location + j] = base_format;
-	}
-
-	for (unsigned i = 0; i < 8; i++)
-		if (rt_formats[i] != VK_FORMAT_UNDEFINED)
-			num_rts = i + 1;
-
-	for (unsigned i = 0; i < 8; i++)
-		if (input_rt_formats[i] != VK_FORMAT_UNDEFINED)
-			num_input_rts = i + 1;
-
-	if (num_rts + num_input_rts > 8)
-	{
-		LOGE("Number of total attachments exceeds 8.\n");
-		return VK_NULL_HANDLE;
 	}
 
 	unsigned output_location_to_attachment[8] = {};
@@ -897,7 +897,7 @@ int main(int argc, char *argv[])
 
 	VkRenderPass render_pass = VK_NULL_HANDLE;
 	uint8_t active_rt_mask = 0;
-	if (compilers[STAGE_FRAG])
+	if (compilers[STAGE_VERT])
 	{
 		render_pass = synthesize_render_pass(recorder, compilers[STAGE_FRAG], active_rt_mask);
 		if (render_pass == VK_NULL_HANDLE)
