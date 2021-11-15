@@ -27,7 +27,9 @@
 #include "vulkan.h"
 #include "spirv_cross_c.h"
 #include "file.hpp"
+#include "spirv-tools/libspirv.hpp"
 #include <algorithm>
+#include <cinttypes>
 #include <memory>
 #include <string.h>
 
@@ -41,6 +43,7 @@ static void print_help()
 	     "\t[--tese shader.spv]\n"
 	     "\t[--geom shader.spv]\n"
 	     "\t[--frag shader.spv]\n"
+	     "\t[--frag-from-vert]\n"
 	     "\t[--comp shader.spv]\n"
 	     "\t[--output out.foz]\n"
 	     "\t[--spec <ID> <f32/u32/i32> <value>\n"
@@ -799,10 +802,170 @@ static VkPipeline synthesize_graphics_pipeline(StateRecorder &recorder,
 	return (VkPipeline)uint64_t(1);
 }
 
+static bool make_compatible_frag(spvc_context ctx, spvc_compiler vert, std::vector<uint8_t>& module, spvc_compiler& compiler)
+{
+	spvc_resources resources;
+	if (spvc_compiler_create_shader_resources(vert, &resources) != SPVC_SUCCESS)
+	{
+		LOGE("Failed to reflect resources.\n");
+		return false;
+	}
+
+	const spvc_reflected_resource* list;
+	size_t count;
+
+	if (spvc_resources_get_resource_list_for_type(resources, SPVC_RESOURCE_TYPE_STAGE_OUTPUT, &list, &count) != SPVC_SUCCESS)
+		return false;
+
+	std::string contents = R"(OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %fragColor %texcoord %frag_pos
+               OpExecutionMode %main OriginUpperLeft
+               OpSource GLSL 460
+               OpName %main "main"
+               OpName %fragColor "fragColor"
+               OpName %texcoord "texcoord"
+               OpName %frag_pos "frag_pos"
+               OpDecorate %fragColor Location 0
+               OpDecorate %texcoord Location 0
+               OpDecorate %frag_pos Location 1
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+    %v4float = OpTypeVector %float 4
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+  %fragColor = OpVariable %_ptr_Output_v4float Output
+%float_0_400000006 = OpConstant %float 0.400000006
+%float_0_800000012 = OpConstant %float 0.800000012
+    %float_1 = OpConstant %float 1
+         %13 = OpConstantComposite %v4float %float_0_400000006 %float_0_400000006 %float_0_800000012 %float_1
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+   %texcoord = OpVariable %_ptr_Input_v4float Input
+    %v3float = OpTypeVector %float 3
+%_ptr_Input_v3float = OpTypePointer Input %v3float
+   %frag_pos = OpVariable %_ptr_Input_v3float Input
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+               OpStore %fragColor %13
+)";
+	for (size_t i = 0; i < count; i++)
+	{
+		uint32_t location = spvc_compiler_get_decoration(vert, list[i].id, SpvDecorationLocation);
+		spvc_type out_type = spvc_compiler_get_type_handle(vert, list[i].type_id);
+
+		const char* var_type = "";
+		switch (spvc_type_get_basetype(out_type))
+		{
+		case SPVC_BASETYPE_FP16:
+		case SPVC_BASETYPE_FP32:
+			switch (spvc_type_get_vector_size(out_type))
+			{
+			case 2:
+				var_type = "vec2";
+				break;
+			case 3:
+				var_type = "vec3";
+				break;
+			case 4:
+				var_type = "vec4";
+				break;
+			default:
+				var_type = "float";
+			}
+			break;
+
+		case SPVC_BASETYPE_INT16:
+		case SPVC_BASETYPE_INT32:
+			switch (spvc_type_get_vector_size(out_type))
+			{
+			case 2:
+				var_type = "ivec2";
+				break;
+			case 3:
+				var_type = "ivec3";
+				break;
+			case 4:
+				var_type = "ivec4";
+				break;
+			default:
+				var_type = "int";
+			}
+			break;
+
+		case SPVC_BASETYPE_UINT16:
+		case SPVC_BASETYPE_UINT32:
+			switch (spvc_type_get_vector_size(out_type))
+			{
+			case 2:
+				var_type = "uvec2";
+				break;
+			case 3:
+				var_type = "uvec3";
+				break;
+			case 4:
+				var_type = "uvec4";
+				break;
+			default:
+				var_type = "uint";
+			}
+			break;
+
+		default:
+			LOGE("Unhandled vertex output type.\n");
+			return false;
+		}
+
+		char line[128];
+		snprintf(line, sizeof(line), "layout (location = %" PRIu32 ") in %s %s;\n", location, var_type, list[i].name);
+		//contents += line;
+	}
+
+	contents += R"(               OpReturn
+               OpFunctionEnd
+)";
+
+	std::vector<uint32_t> spv;
+	{
+		spv_binary binary;
+		spv_diagnostic diagnostic = nullptr;
+		spv_context context = spvContextCreate(SPV_ENV_UNIVERSAL_1_5);
+		spv_result_t error = spvTextToBinaryWithOptions(context, contents.data(), contents.size(), 0, &binary, &diagnostic);
+		spvContextDestroy(context);
+		if (error) {
+			spvDiagnosticPrint(diagnostic);
+			spvDiagnosticDestroy(diagnostic);
+			return false;
+		}
+
+		module.resize(binary->wordCount * 4);
+		memcpy(module.data(), binary->code, module.size());
+		spv.assign(binary->code, binary->code + binary->wordCount);
+		spvBinaryDestroy(binary);
+	}
+
+	spvc_parsed_ir parsed;
+	if (spvc_context_parse_spirv(ctx, spv.data(), spv.size(), &parsed) != SPVC_SUCCESS)
+	{
+		LOGE("Failed to parse SPIR-V.\n");
+		return false;
+	}
+
+	if (spvc_context_create_compiler(ctx, SPVC_BACKEND_NONE, parsed,
+		SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler) != SPVC_SUCCESS)
+	{
+		LOGE("Failed to create compiler.\n");
+		return false;
+	}
+
+	return true;
+}
+
 int main(int argc, char *argv[])
 {
 	CLICallbacks cbs;
 	std::string spv_paths[STAGE_COUNT];
+	bool frag_from_vert = false;
 	std::string output_path;
 	SpecConstant spec_constants;
 
@@ -811,6 +974,7 @@ int main(int argc, char *argv[])
 	cbs.add("--tese", [&](CLIParser &parser) { spv_paths[STAGE_TESE] = parser.next_string(); });
 	cbs.add("--geom", [&](CLIParser &parser) { spv_paths[STAGE_GEOM] = parser.next_string(); });
 	cbs.add("--frag", [&](CLIParser &parser) { spv_paths[STAGE_FRAG] = parser.next_string(); });
+	cbs.add("--frag-from-vert", [&](CLIParser&) { frag_from_vert = true; });
 	cbs.add("--comp", [&](CLIParser &parser) { spv_paths[STAGE_COMP] = parser.next_string(); });
 	cbs.add("--output", [&](CLIParser &parser) { output_path = parser.next_string(); });
 	cbs.add("--help", [&](CLIParser &parser) { parser.end(); });
@@ -899,9 +1063,44 @@ int main(int argc, char *argv[])
 	uint8_t active_rt_mask = 0;
 	if (compilers[STAGE_VERT])
 	{
+		if (frag_from_vert)
+		{
+			if (compilers[STAGE_FRAG])
+			{
+				LOGE("Don't specify --frag-from-vert with --frag.\n");
+				return EXIT_FAILURE;
+			}
+
+			if (compilers[STAGE_TESC])
+			{
+				LOGE("Only --vert is supported when --frag-from-vert is used.\n");
+				return EXIT_FAILURE;
+			}
+
+			if (compilers[STAGE_TESE])
+			{
+				LOGE("Only --vert is supported when --frag-from-vert is used.\n");
+				return EXIT_FAILURE;
+			}
+
+			if (compilers[STAGE_GEOM])
+			{
+				LOGE("Only --vert is supported when --frag-from-vert is used.\n");
+				return EXIT_FAILURE;
+			}
+
+			if (!make_compatible_frag(context, compilers[STAGE_VERT], modules[STAGE_FRAG], compilers[STAGE_FRAG]))
+				return EXIT_FAILURE;
+		}
+
 		render_pass = synthesize_render_pass(recorder, compilers[STAGE_FRAG], active_rt_mask);
 		if (render_pass == VK_NULL_HANDLE)
 			return EXIT_FAILURE;
+	}
+	else if (frag_from_vert)
+	{
+		LOGE("Specified --frag-from-vert without vert.\n");
+		return EXIT_FAILURE;
 	}
 
 	VkPipeline pipeline;
